@@ -1,0 +1,7 @@
+P(a) -> ∃x.P(x)
+∃x.P(x) -> ∃x.P(x)
+∀x.P(x) -> ∀x.P(x) 
+∀x.P(x) -> P(a) /\ P(b) 
+(∀x.P(x)) /\ (∀x.Q(x)) -> P(a) /\ Q(a) 
+(∀x.(P(x) -> Q(x)) /\ P(a)) -> Q(a) 
+∀x.(P(x) \/ Q(x)) /\ ~P(a) -> Q(a) 
