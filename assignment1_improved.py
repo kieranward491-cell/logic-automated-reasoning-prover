@@ -1,27 +1,59 @@
+# assignment1_improved.py
+#
+# Improved backward proof search prover for first-order logic.
+# Extends the baseline (Algorithm 2 from [1]) with the following improvements:
+#
+#   1. Branch-local state — each branch maintains its own terms, counter,
+#      and used-terms record, preventing cross-branch contamination.
+#
+#   2. Rule prioritisation and delayed quantifier instantiation — branching
+#      rules are prioritised over ∀L/∃R, and used-terms tracking prevents
+#      repeated identical instantiations.
+#
+#   3. Goal-directed term selection — terms already present in the current
+#      sequent are preferred when instantiating quantified formulas.
+#
+#   4. Duplicate detection — sequents are normalised and stored per branch
+#      to prevent revisiting identical states.
+#
+#   5. Branch selection heuristic — the smallest open branch is processed
+#      first, closing simpler goals before tackling complex ones.
+
 from dataclasses import dataclass, field
-from multiprocessing.util import debug
-from shlex import split
 from typing import List, Optional, Tuple, Union
 from formulas import *
+
+
+# ── Improved Branch ───────────────────────────────────────────────────────────
+# Overrides the shared-state Branch from formulas.py with branch-local state.
+# Each branch independently tracks its terms, counter, used instantiations,
+# and previously seen sequents.
 
 @dataclass
 class Branch:
     sequents: List[Sequent]
     closed: bool = False
     failed: bool = False
-    terms: set = field(default_factory=set)
-    counter: int = 0
-    used_terms: dict = field(default_factory=dict)
-    seen: set = field(default_factory=set)
+    terms: set = field(default_factory=set)          # constants known on this branch
+    counter: int = 0                                  # fresh constant counter
+    used_terms: dict = field(default_factory=dict)   # formula -> set of terms tried
+    seen: set = field(default_factory=set)            # sequents visited on this branch
 
     def __post_init__(self):
+        # Initialise seen set from the starting sequents if not provided
         if not self.seen:
             self.seen = set(self.sequents)
 
     def top(self) -> Sequent:
+        """Return the current sequent at the top of this branch."""
         return self.sequents[-1]
 
     def add(self, sequent: Sequent) -> bool:
+        """
+        Normalise and add a sequent to this branch.
+        Returns False if the sequent has already been seen (duplicate detection),
+        True otherwise.
+        """
         sequent = normalize_sequent(sequent)
         if sequent in self.seen:
             return False
@@ -29,21 +61,19 @@ class Branch:
         self.seen.add(sequent)
         return True
 
-def fresh_constant(counter: int) -> Constant:
-    return Constant(f"c{counter}")
 
+# ── Improvement helpers ───────────────────────────────────────────────────────
 
-
-def short_side(formulas, limit=5):
-    items = [str(f) for f in formulas[:limit]]
-    if len(formulas) > limit:
-        items.append(f"... (+{len(formulas) - limit} more)")
-    return ", ".join(items) if items else "·"
-
-def short_sequent(sequent, limit=5):
-    left = short_side(list(sequent.left), limit)
-    right = short_side(list(sequent.right), limit)
-    return f"{left} ⊢ {right}"
+def normalize_sequent(sequent: Sequent) -> Sequent:
+    """
+    Normalise a sequent by sorting and deduplicating both sides.
+    This ensures that sequents which are logically identical but
+    structurally different (e.g. different formula orderings) are
+    treated as the same state by duplicate detection.
+    """
+    left = tuple(sorted(set(sequent.left), key=str))
+    right = tuple(sorted(set(sequent.right), key=str))
+    return Sequent(left, right)
 
 def collect_terms_from_sequent(sequent: Sequent) -> set:
     """Collect all constants currently appearing anywhere in the sequent."""
@@ -54,15 +84,11 @@ def collect_terms_from_sequent(sequent: Sequent) -> set:
         terms |= collect_constants(formula)
     return terms
 
-
-def choose_term_for_instantiation(
-    sequent: Sequent,
-    available_terms: set,
-    global_terms: set
-):
+def choose_term_for_instantiation(sequent: Sequent, available_terms: set, global_terms: set):
     """
-    Prefer terms already visible in the current sequent.
-    If none are available, fall back to any known global term.
+    Goal-directed term selection.
+    Prefer terms already visible in the current sequent over globally known
+    terms, increasing the likelihood that the instantiation is relevant.
     """
     sequent_terms = collect_terms_from_sequent(sequent)
 
@@ -76,98 +102,148 @@ def choose_term_for_instantiation(
 
     return None
 
+def formula_mentions_target(formula: Formula, target_terms: set) -> bool:
+    """Return True if the formula contains any of the target constants."""
+    return bool(collect_constants(formula) & target_terms)
+
 def branch_score(branch: Branch) -> int:
+    """
+    Branch selection heuristic — score a branch by the size of its
+    current sequent. Smaller scores are processed first, closing
+    simpler branches before tackling complex ones.
+    """
     s = branch.top()
     return len(s.left) + len(s.right)
 
-def formula_mentions_target(formula: Formula, target_terms: set) -> bool:
-    return bool(collect_constants(formula) & target_terms)
+def short_side(formulas, limit=5):
+    """Truncate a list of formulas for compact debug output."""
+    items = [str(f) for f in formulas[:limit]]
+    if len(formulas) > limit:
+        items.append(f"... (+{len(formulas) - limit} more)")
+    return ", ".join(items) if items else "·"
 
-def normalize_sequent(sequent: Sequent) -> Sequent:
-    left = tuple(sorted(set(sequent.left), key=str))
-    right = tuple(sorted(set(sequent.right), key=str))
-    return Sequent(left, right)
+def short_sequent(sequent, limit=5):
+    """Format a sequent compactly for debug output."""
+    left = short_side(list(sequent.left), limit)
+    right = short_side(list(sequent.right), limit)
+    return f"{left} ⊢ {right}"
+
+def fresh_constant(counter: int) -> Constant:
+    """Generate a fresh constant with a unique name."""
+    return Constant(f"c{counter}")
 
 
-def apply_and_left(sequent: Sequent) -> Optional[Sequent]:
-    for f in sequent.left:
+# ── Propositional non-branching rules ────────────────────────────────────────
+# Unchanged from the baseline — these have no interaction with the improvements.
+
+def apply_and_left(s: Sequent) -> Optional[Sequent]:
+    """∧L: replace A ∧ B on the left with A, B."""
+    for f in s.left:
         if isinstance(f, And):
-            new_left = replace_one_with_many(sequent.left, f, [f.left, f.right])
-            return Sequent(new_left, sequent.right)
+            return Sequent(replace_one_with_many(s.left, f, [f.left, f.right]), s.right)
     return None
 
-
-def apply_or_right(sequent: Sequent) -> Optional[Sequent]:
-    for f in sequent.right:
+def apply_or_right(s: Sequent) -> Optional[Sequent]:
+    """∨R: replace A ∨ B on the right with A, B."""
+    for f in s.right:
         if isinstance(f, Or):
-            new_right = replace_one_with_many(sequent.right, f, [f.left, f.right])
-            return Sequent(sequent.left, new_right)
+            return Sequent(s.left, replace_one_with_many(s.right, f, [f.left, f.right]))
     return None
 
-
-def apply_implies_right(sequent: Sequent) -> Optional[Sequent]:
-    for f in sequent.right:
+def apply_implies_right(s: Sequent) -> Optional[Sequent]:
+    """→R: move antecedent to left, consequent stays right."""
+    for f in s.right:
         if isinstance(f, Implies):
-            new_right = remove_one(sequent.right, f)
-            new_right = tuple(list(new_right) + [f.right])
-            new_left = tuple(list(sequent.left) + [f.left])
-            return Sequent(new_left, new_right)
+            return Sequent(
+                tuple(list(s.left) + [f.left]),
+                tuple(list(remove_one(s.right, f)) + [f.right])
+            )
     return None
 
-
-def apply_not_left(sequent: Sequent) -> Optional[Sequent]:
-    for f in sequent.left:
+def apply_not_left(s: Sequent) -> Optional[Sequent]:
+    """¬L: move negated formula to the right."""
+    for f in s.left:
         if isinstance(f, Not):
-            new_left = remove_one(sequent.left, f)
-            new_right = tuple(list(sequent.right) + [f.formula])
-            return Sequent(new_left, new_right)
+            return Sequent(remove_one(s.left, f), tuple(list(s.right) + [f.formula]))
     return None
 
-
-def apply_not_right(sequent: Sequent) -> Optional[Sequent]:
-    for f in sequent.right:
+def apply_not_right(s: Sequent) -> Optional[Sequent]:
+    """¬R: move negated formula to the left."""
+    for f in s.right:
         if isinstance(f, Not):
-            new_right = remove_one(sequent.right, f)
-            new_left = tuple(list(sequent.left) + [f.formula])
-            return Sequent(new_left, new_right)
+            return Sequent(tuple(list(s.left) + [f.formula]), remove_one(s.right, f))
     return None
 
 
-def apply_and_right(sequent: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
-    for f in sequent.right:
+# ── Branching rules ───────────────────────────────────────────────────────────
+
+def apply_and_right(s: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
+    """∧R: split A ∧ B on the right into two branches, one for each conjunct."""
+    for f in s.right:
         if isinstance(f, And):
-            base_right = list(remove_one(sequent.right, f))
-            s1 = Sequent(sequent.left, tuple(base_right + [f.left]))
-            s2 = Sequent(sequent.left, tuple(base_right + [f.right]))
-            return s1, s2
+            base = list(remove_one(s.right, f))
+            return (Sequent(s.left, tuple(base + [f.left])),
+                    Sequent(s.left, tuple(base + [f.right])))
     return None
 
-
-def apply_or_left(sequent: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
-    for f in sequent.left:
+def apply_or_left(s: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
+    """∨L: split A ∨ B on the left into two branches, one for each disjunct."""
+    for f in s.left:
         if isinstance(f, Or):
-            base_left = list(remove_one(sequent.left, f))
-            s1 = Sequent(tuple(base_left + [f.left]), sequent.right)
-            s2 = Sequent(tuple(base_left + [f.right]), sequent.right)
-            return s1, s2
+            base = list(remove_one(s.left, f))
+            return (Sequent(tuple(base + [f.left]), s.right),
+                    Sequent(tuple(base + [f.right]), s.right))
     return None
 
-
-def apply_implies_left(sequent: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
-    for f in sequent.left:
+def apply_implies_left(s: Sequent) -> Optional[Tuple[Sequent, Sequent]]:
+    """→L: split A → B on the left into two branches — prove A or assume B."""
+    for f in s.left:
         if isinstance(f, Implies):
-            base_left = list(remove_one(sequent.left, f))
-            s1 = Sequent(tuple(base_left), tuple(list(sequent.right) + [f.left]))
-            s2 = Sequent(tuple(base_left + [f.right]), sequent.right)
-            return s1, s2
+            base = list(remove_one(s.left, f))
+            return (Sequent(tuple(base), tuple(list(s.right) + [f.left])),
+                    Sequent(tuple(base + [f.right]), s.right))
     return None
+
+
+# ── Deterministic quantifier rules ───────────────────────────────────────────
+
+def apply_forall_right(sequent: Sequent, terms: set, counter: int):
+    """∀R: replace ∀x.A on the right with A[x/c] for a fresh constant c."""
+    for f in sequent.right:
+        if isinstance(f, ForAll):
+            new_const = fresh_constant(counter)
+            terms.add(new_const)
+            instantiated = substitute(f.body, f.var, new_const)
+            new_right = replace_one_with_many(sequent.right, f, [instantiated])
+            return Sequent(sequent.left, new_right), counter + 1
+    return None, counter
+
+def apply_exists_left(sequent: Sequent, terms: set, counter: int):
+    """∃L: replace ∃x.A on the left with A[x/c] for a fresh constant c."""
+    for f in sequent.left:
+        if isinstance(f, Exists):
+            new_const = fresh_constant(counter)
+            terms.add(new_const)
+            instantiated = substitute(f.body, f.var, new_const)
+            new_left = replace_one_with_many(sequent.left, f, [instantiated])
+            return Sequent(new_left, sequent.right), counter + 1
+    return None, counter
+
+
+# ── Non-deterministic quantifier rules (improved) ────────────────────────────
+# These differ from the baseline in two ways:
+#   - Used-terms tracking prevents re-instantiation with the same term
+#   - Goal-directed term selection prefers terms already in the sequent
 
 def apply_forall_left(
-    sequent: Sequent,
-    terms: set,
-    used_terms: dict,
-    counter: int
+    sequent: Sequent, terms: set, used_terms: dict, counter: int
 ) -> Tuple[Optional[Sequent], int]:
+    """
+    ∀L: add A[x/t] to the left for some term t, keeping ∀x.A.
+    Selects the most relevant unused term via goal-directed selection.
+    Falls back to a fresh constant if all existing terms are exhausted.
+    """
+    # Collect constants from the right side to guide term selection
     target_terms = set()
     for f in sequent.right:
         target_terms |= collect_constants(f)
@@ -183,10 +259,12 @@ def apply_forall_left(
             fresh_needed = False
 
             if t is None:
+                # All existing terms exhausted — generate a fresh constant
                 t = fresh_constant(counter)
                 fresh_needed = True
 
             instantiated = substitute(f.body, f.var, t)
+            # Score this instantiation by whether it mentions a goal term
             score = 1 if formula_mentions_target(instantiated, target_terms) else 0
 
             if best_choice is None or score > best_choice[0]:
@@ -207,11 +285,10 @@ def apply_forall_left(
 
 
 def apply_exists_right(
-    sequent: Sequent,
-    terms: set,
-    used_terms: dict,
-    counter: int
+    sequent: Sequent, terms: set, used_terms: dict, counter: int
 ) -> Tuple[Optional[Sequent], int]:
+    
+    # Collect constants from the left side to guide term selection
     target_terms = set()
     for f in sequent.left:
         target_terms |= collect_constants(f)
@@ -250,29 +327,20 @@ def apply_exists_right(
     return Sequent(sequent.left, new_right), counter
 
 
-def apply_forall_right(sequent: Sequent, terms: set, counter: int):
-    for f in sequent.right:
-        if isinstance(f, ForAll):
-            new_const = fresh_constant(counter)
-            terms.add(new_const)
-            instantiated = substitute(f.body, f.var, new_const)
-            new_right = replace_one_with_many(sequent.right, f, [instantiated])
-            return Sequent(sequent.left, new_right), counter + 1
-    return None, counter
-
-
-def apply_exists_left(sequent: Sequent, terms: set, counter: int):
-    for f in sequent.left:
-        if isinstance(f, Exists):
-            new_const = fresh_constant(counter)
-            terms.add(new_const)
-            instantiated = substitute(f.body, f.var, new_const)
-            new_left = replace_one_with_many(sequent.left, f, [instantiated])
-            return Sequent(new_left, sequent.right), counter + 1
-    return None, counter
+# ── Rule dispatch ─────────────────────────────────────────────────────────────
 
 def apply_non_branching_rule(sequent, terms, counter, used_terms):
-    # 1. Propositional non-branching rules first
+    """
+    Apply the highest-priority applicable non-branching rule.
+    Returns (rule_name, sequent, counter) or (None, None, counter).
+
+    Priority:
+      1. Propositional non-branching rules
+      2. Deterministic quantifier rules (∀R, ∃L)
+      3. Skip if a branching rule applies (delay ∀L/∃R)
+      4. Non-deterministic quantifier rules (∀L, ∃R)
+    """
+    # Priority 1: propositional non-branching rules
     for name, rule in [
         ("∧L", apply_and_left),
         ("∨R", apply_or_right),
@@ -284,7 +352,7 @@ def apply_non_branching_rule(sequent, terms, counter, used_terms):
         if result is not None:
             return name, result, counter
 
-    # 2. Deterministic quantifier rules next
+    # Priority 2: deterministic quantifier rules
     res, counter = apply_forall_right(sequent, terms, counter)
     if res is not None:
         return "∀R", res, counter
@@ -293,12 +361,12 @@ def apply_non_branching_rule(sequent, terms, counter, used_terms):
     if res is not None:
         return "∃L", res, counter
 
-    # 3. If a branching rule is available, do NOT instantiate ∀L / ∃R yet
+    # Priority 3: defer to branching rules if one is available
     branch_rule_name, split = apply_branching_rule(sequent)
     if split is not None:
         return None, None, counter
 
-    # 4. Only now try non-deterministic instantiation rules
+    # Priority 4: non-deterministic instantiation as last resort
     res, counter = apply_forall_left(sequent, terms, used_terms, counter)
     if res is not None:
         return "∀L", res, counter
@@ -310,6 +378,10 @@ def apply_non_branching_rule(sequent, terms, counter, used_terms):
     return None, None, counter
 
 def apply_branching_rule(sequent: Sequent):
+    """
+    Apply the highest-priority applicable branching rule.
+    Returns (rule_name, (s1, s2)) or (None, None).
+    """
     for name, rule in [
         ("∧R", apply_and_right),
         ("∨L", apply_or_left),
@@ -321,10 +393,29 @@ def apply_branching_rule(sequent: Sequent):
     return None, None
 
 
+# ── Main proof search loop ────────────────────────────────────────────────────
+
 def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
+    """
+    Attempt to prove a formula using improved backward proof search.
+
+    Improvements over the baseline:
+      - Branch-local state (terms, counter, used_terms, seen)
+      - Goal-directed term selection
+      - Duplicate sequent detection
+      - Branch selection heuristic (smallest branch first)
+
+    Returns True if all branches close, False otherwise.
+
+    Args:
+        formula: The formula to prove.
+        max_steps: Maximum rule applications before giving up.
+        debug: If True, print each step to stdout.
+    """
     initial = Sequent((), (formula,))
     initial_terms = collect_constants(formula)
 
+    # Each branch gets its own independent copy of state
     branches = [
         Branch(
             sequents=[initial],
@@ -337,6 +428,7 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
     steps = 0
 
     while branches and steps < max_steps:
+        # Branch selection heuristic — process smallest open branch first
         open_branch = min(
             (b for b in branches if not b.closed and not b.failed),
             key=branch_score,
@@ -351,7 +443,7 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
         if debug:
             print(f"Step {steps + 1}: {short_sequent(current)}")
 
-        # Trivial closing rules
+        # Priority 1: trivial closure
         if is_trivial(current):
             if debug:
                 print("  Closed by trivial rule")
@@ -359,7 +451,7 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
             steps += 1
             continue
 
-        # Non-branching rules
+        # Priority 2-4: non-branching rules
         rule_name, next_seq, new_counter = apply_non_branching_rule(
             current,
             open_branch.terms,
@@ -369,6 +461,7 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
 
         if next_seq is not None:
             if not open_branch.add(next_seq):
+                # Duplicate detected — this branch is cycling, mark as failed
                 if debug:
                     print(f"  {rule_name} produced duplicate sequent, branch failed")
                 open_branch.failed = True
@@ -379,33 +472,34 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
             steps += 1
             continue
 
-        # Branching rules
+        # Priority 3: branching rules
         branch_rule_name, split = apply_branching_rule(current)
         if split is not None:
             s1, s2 = split
 
             if debug:
-                print(f"  Applied {branch_rule_name} -> {short_sequent(s1)}   |   {short_sequent(s2)}")
+                print(f"  Applied {branch_rule_name} -> {short_sequent(s1)}  |  {short_sequent(s2)}")
 
+            # Snapshot parent state before modifying current branch
             parent_path = open_branch.sequents[:]
             parent_seen = set(open_branch.seen)
             parent_terms = set(open_branch.terms)
             parent_counter = open_branch.counter
             parent_used_terms = {k: set(v) for k, v in open_branch.used_terms.items()}
 
-            # Left child stays on current branch
+            # Left child continues on the current branch
             added_left = open_branch.add(s1)
-
             if not added_left:
                 if debug:
-                    print("  Left branch duplicate, marking current branch failed")
+                    print("  Left branch duplicate, marking failed")
                 open_branch.failed = True
             else:
+                # Restore parent state so left branch is independent
                 open_branch.terms = set(parent_terms)
                 open_branch.counter = parent_counter
                 open_branch.used_terms = {k: set(v) for k, v in parent_used_terms.items()}
 
-            # Right child becomes a new branch
+            # Right child becomes a new independent branch
             if s2 not in parent_seen:
                 new_branch = Branch(
                     sequents=parent_path + [s2],
@@ -426,9 +520,12 @@ def prove(formula: Formula, max_steps: int = 1000, debug: bool = False) -> bool:
         open_branch.failed = True
         steps += 1
 
+    # Proof succeeds only if every branch was closed
     return all(branch.closed for branch in branches)
 
+
 if __name__ == "__main__":
+    # Set to True to run the built-in test suite
     RUN_TESTS = False
 
     if RUN_TESTS:
