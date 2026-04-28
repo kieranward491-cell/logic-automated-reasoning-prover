@@ -1,225 +1,216 @@
+# formulas.py
+#
+# Shared data model for the first-order logic prover.
+# Defines the AST node types, sequent and branch structures,
+# and utility functions used by both the baseline and improved provers.
+
 from dataclasses import dataclass, field
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
+
+
+# ── Formula AST ───────────────────────────────────────────────────────────────
+# All formula types inherit from Formula. Dataclasses are frozen (immutable
+# and hashable) so they can be stored in sets and used as dictionary keys.
 
 class Formula:
     pass
 
+
 @dataclass(frozen=True)
 class Atom(Formula):
+    """A propositional atom, e.g. P, Q."""
     name: str
-
-    def __str__(self):
-        return self.name
-
+    def __str__(self): return self.name
 
 @dataclass(frozen=True)
 class Truth(Formula):
-    def __str__(self):
-        return "⊤"
-
+    """The logical constant ⊤ (true)."""
+    def __str__(self): return "⊤"
 
 @dataclass(frozen=True)
 class Falsehood(Formula):
-    def __str__(self):
-        return "⊥"
-
+    """The logical constant ⊥ (false)."""
+    def __str__(self): return "⊥"
 
 @dataclass(frozen=True)
 class Not(Formula):
+    """Negation: ¬A."""
     formula: Formula
-
-    def __str__(self):
-        return f"¬({self.formula})"
-
+    def __str__(self): return f"¬({self.formula})"
 
 @dataclass(frozen=True)
 class And(Formula):
+    """Conjunction: A ∧ B."""
     left: Formula
     right: Formula
-
-    def __str__(self):
-        return f"({self.left} ∧ {self.right})"
-
+    def __str__(self): return f"({self.left} ∧ {self.right})"
 
 @dataclass(frozen=True)
 class Or(Formula):
+    """Disjunction: A ∨ B."""
     left: Formula
     right: Formula
-
-    def __str__(self):
-        return f"({self.left} ∨ {self.right})"
-
+    def __str__(self): return f"({self.left} ∨ {self.right})"
 
 @dataclass(frozen=True)
 class Implies(Formula):
+    """Implication: A → B."""
     left: Formula
     right: Formula
+    def __str__(self): return f"({self.left} → {self.right})"
 
+
+# ── First-order logic terms ───────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Variable:
+    """A logical variable, e.g. x, y. Bound by a quantifier."""
+    name: str
+    def __str__(self): return self.name
+
+@dataclass(frozen=True)
+class Constant:
+    """A logical constant, e.g. a, b, c0. Not bound by any quantifier."""
+    name: str
+    def __str__(self): return self.name
+
+@dataclass(frozen=True)
+class Predicate(Formula):
+    """A predicate applied to a list of terms, e.g. P(x, a)."""
+    name: str
+    args: Tuple[Union[Variable, Constant], ...]
     def __str__(self):
-        return f"({self.left} → {self.right})"
+        return f"{self.name}({', '.join(str(a) for a in self.args)})"
 
+@dataclass(frozen=True)
+class ForAll(Formula):
+    """Universal quantification: ∀x.A."""
+    var: Variable
+    body: Formula
+    def __str__(self): return f"∀{self.var}.{self.body}"
+
+@dataclass(frozen=True)
+class Exists(Formula):
+    """Existential quantification: ∃x.A."""
+    var: Variable
+    body: Formula
+    def __str__(self): return f"∃{self.var}.{self.body}"
+
+
+# ── Sequent ───────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Sequent:
+    """
+    A sequent Γ ⊢ Δ where Γ (left) and Δ (right) are tuples of formulas.
+    Frozen so sequents can be stored in sets for duplicate detection.
+    """
     left: Tuple[Formula, ...]
     right: Tuple[Formula, ...]
 
     def __str__(self):
-        left_str = ", ".join(str(f) for f in self.left) if self.left else "·"
-        right_str = ", ".join(str(f) for f in self.right) if self.right else "·"
-        return f"{left_str} ⊢ {right_str}"
+        l = ", ".join(str(f) for f in self.left) if self.left else "·"
+        r = ", ".join(str(f) for f in self.right) if self.right else "·"
+        return f"{l} ⊢ {r}"
 
+
+# ── Branch ────────────────────────────────────────────────────────────────────
+# Baseline branch — simple shared state, no isolation between branches.
+# The improved prover overrides this with a branch-local version.
 
 @dataclass
 class Branch:
+    """
+    A single branch in the proof tree, represented as a sequence of sequents
+    from the root to the current frontier.
+    """
     sequents: List[Sequent]
-    closed: bool = False
-    failed: bool = False
+    closed: bool = False   # True if the branch has been closed by a trivial rule
+    failed: bool = False   # True if no rule applies and the branch cannot close
 
     def top(self) -> Sequent:
+        """Return the current sequent at the top of this branch."""
         return self.sequents[-1]
 
     def add(self, sequent: Sequent):
+        """Append a new sequent to this branch."""
         self.sequents.append(sequent)
 
-@dataclass(frozen=True)
-class Variable:
-    name: str
 
-    def __str__(self):
-        return self.name
+# ── Substitution ──────────────────────────────────────────────────────────────
 
-
-@dataclass(frozen=True)
-class Constant:
-    name: str
-
-    def __str__(self):
-        return self.name
-    
-@dataclass(frozen=True)
-class Predicate(Formula):
-    name: str
-    args: Tuple[Union[Variable, Constant], ...]
-
-    def __str__(self):
-        args_str = ", ".join(str(a) for a in self.args)
-        return f"{self.name}({args_str})"
-
-
-@dataclass(frozen=True)
-class ForAll(Formula):
-    var: Variable
-    body: Formula
-
-    def __str__(self):
-        return f"∀{self.var}.{self.body}"
-
-
-@dataclass(frozen=True)
-class Exists(Formula):
-    var: Variable
-    body: Formula
-
-    def __str__(self):
-        return f"∃{self.var}.{self.body}"
-    
 def substitute(formula: Formula, var: Variable, term: Union[Variable, Constant]) -> Formula:
+    """
+    Substitute all free occurrences of var with term in formula.
+    Avoids variable capture by skipping quantifiers that rebind var.
+    """
     if isinstance(formula, Predicate):
-        new_args = tuple(term if arg == var else arg for arg in formula.args)
-        return Predicate(formula.name, new_args)
-
+        return Predicate(formula.name, tuple(term if a == var else a for a in formula.args))
     elif isinstance(formula, And):
-        return And(
-            substitute(formula.left, var, term),
-            substitute(formula.right, var, term),
-        )
-
+        return And(substitute(formula.left, var, term), substitute(formula.right, var, term))
     elif isinstance(formula, Or):
-        return Or(
-            substitute(formula.left, var, term),
-            substitute(formula.right, var, term),
-        )
-
+        return Or(substitute(formula.left, var, term), substitute(formula.right, var, term))
     elif isinstance(formula, Implies):
-        return Implies(
-            substitute(formula.left, var, term),
-            substitute(formula.right, var, term),
-        )
-
+        return Implies(substitute(formula.left, var, term), substitute(formula.right, var, term))
     elif isinstance(formula, Not):
         return Not(substitute(formula.formula, var, term))
-
     elif isinstance(formula, ForAll):
-        if formula.var == var:
-            return formula  # avoid variable capture
+        if formula.var == var: return formula  # var is rebound, stop here
         return ForAll(formula.var, substitute(formula.body, var, term))
-
     elif isinstance(formula, Exists):
-        if formula.var == var:
-            return formula
+        if formula.var == var: return formula  # var is rebound, stop here
         return Exists(formula.var, substitute(formula.body, var, term))
-
     return formula
 
+
+# ── Constant collection ───────────────────────────────────────────────────────
+
 def collect_constants(formula: Formula) -> set:
-    constants = set()
-
+    """
+    Recursively collect all constants appearing in a formula.
+    Used to initialise the term pool before proof search begins.
+    """
     if isinstance(formula, Predicate):
-        for arg in formula.args:
-            if isinstance(arg, Constant):
-                constants.add(arg)
-
+        return {a for a in formula.args if isinstance(a, Constant)}
     elif isinstance(formula, Not):
-        constants |= collect_constants(formula.formula)
-
-    elif isinstance(formula, And):
-        constants |= collect_constants(formula.left)
-        constants |= collect_constants(formula.right)
-
-    elif isinstance(formula, Or):
-        constants |= collect_constants(formula.left)
-        constants |= collect_constants(formula.right)
-
-    elif isinstance(formula, Implies):
-        constants |= collect_constants(formula.left)
-        constants |= collect_constants(formula.right)
-
-    elif isinstance(formula, ForAll):
-        constants |= collect_constants(formula.body)
-
-    elif isinstance(formula, Exists):
-        constants |= collect_constants(formula.body)
-
-    return constants
-
-def remove_one(items: Tuple[Formula, ...], target: Formula) -> Tuple[Formula, ...]:
-    items = list(items)
-    items.remove(target)
-    return tuple(items)
+        return collect_constants(formula.formula)
+    elif isinstance(formula, (And, Or, Implies)):
+        return collect_constants(formula.left) | collect_constants(formula.right)
+    elif isinstance(formula, (ForAll, Exists)):
+        return collect_constants(formula.body)
+    return set()
 
 
-def replace_one_with_many(
-    items: Tuple[Formula, ...],
-    target: Formula,
-    replacements: List[Formula]
-) -> Tuple[Formula, ...]:
-    items = list(items)
-    items.remove(target)
-    items.extend(replacements)
-    return tuple(items)
+# ── Sequent helpers ───────────────────────────────────────────────────────────
 
-def is_identity(sequent: Sequent) -> bool:
-    return any(f in sequent.right for f in sequent.left)
+def remove_one(items: Tuple, target) -> Tuple:
+    """Remove the first occurrence of target from a tuple."""
+    lst = list(items)
+    lst.remove(target)
+    return tuple(lst)
 
-
-def has_top_right(sequent: Sequent) -> bool:
-    return any(isinstance(f, Truth) for f in sequent.right)
+def replace_one_with_many(items: Tuple, target, replacements: List) -> Tuple:
+    """Replace the first occurrence of target in a tuple with a list of replacements."""
+    lst = list(items)
+    lst.remove(target)
+    lst.extend(replacements)
+    return tuple(lst)
 
 
-def has_bottom_left(sequent: Sequent) -> bool:
-    return any(isinstance(f, Falsehood) for f in sequent.left)
+# ── Trivial closure checks ────────────────────────────────────────────────────
 
+def is_identity(s: Sequent) -> bool:
+    """True if any formula appears on both sides of the sequent (id rule)."""
+    return any(f in s.right for f in s.left)
 
-def is_trivial(sequent: Sequent) -> bool:
-    return is_identity(sequent) or has_top_right(sequent) or has_bottom_left(sequent)
+def has_top_right(s: Sequent) -> bool:
+    """True if ⊤ appears on the right (⊤R rule)."""
+    return any(isinstance(f, Truth) for f in s.right)
+
+def has_bottom_left(s: Sequent) -> bool:
+    """True if ⊥ appears on the left (⊥L rule)."""
+    return any(isinstance(f, Falsehood) for f in s.left)
+
+def is_trivial(s: Sequent) -> bool:
+    """True if the sequent can be closed immediately by a trivial rule."""
+    return is_identity(s) or has_top_right(s) or has_bottom_left(s)
