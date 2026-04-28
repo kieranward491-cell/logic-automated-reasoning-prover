@@ -6,6 +6,16 @@ from formulas import *
 
 def run_benchmark(file_path: str, prover, prover_name: str, max_steps: int = 1000):
     formulas = parse_file(file_path)
+    
+    """
+    Run a prover against a benchmark file and report results.
+    
+    Args:
+        file_path: Path to a text file containing one formula per line.
+        prover: The prove function to evaluate.
+        prover_name: Display name used in output.
+        max_steps: Maximum proof search steps before giving up.
+    """
 
     solved = 0
     total = len(formulas)
@@ -53,13 +63,7 @@ def run_benchmark(file_path: str, prover, prover_name: str, max_steps: int = 100
 
 
 if __name__ == "__main__":
-
-    # Quick sanity check
-    from assignment1_baseline import (Atom, Implies)
-    test = Implies(Atom("P"), Atom("P"))
-    print("Baseline sanity:", baseline_prove(test))
-    print("Improved sanity:", improved_prove(test))
-
+    # Benchmark datasets ordered by difficulty
     benchmark_files = [
         "benchmark_easy.txt",
         "benchmark_medium.txt",
@@ -67,11 +71,13 @@ if __name__ == "__main__":
     ]
 
     summary = []
-
+    
+    # Run each prover against each dataset and collect results
     for file_path in benchmark_files:
         summary.append(run_benchmark(file_path, baseline_prove, "Baseline"))
         summary.append(run_benchmark(file_path, improved_prove, "Improved"))
-
+        
+    # Print a comparison table across all datasets and provers
     print("\n=== Summary Table ===")
     print(f"{'Dataset':<22} {'Prover':<10} {'Solved':<10} {'Total Time (s)':<15} {'Avg Time (s)':<15}")
     print("-" * 75)
