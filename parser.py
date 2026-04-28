@@ -1,4 +1,17 @@
 # parser.py
+#
+# Recursive descent parser for first-order logic formulae.
+# Converts text input into the AST defined in formulas.py.
+#
+# Grammar:
+#   formula  ::= implies
+#   implies  ::= or ('→' implies)?
+#   or       ::= and ('∨' and)*
+#   and      ::= unary ('∧' unary)*
+#   unary    ::= '¬' unary | quantifier | atom
+#   quantifier ::= ('∀' | '∃') identifier '.' formula
+#   atom     ::= '⊤' | '⊥' | identifier '(' term_list ')' | identifier | '(' formula ')'
+#   term_list ::= term (',' term)*
 
 from torch import var
 from formulas import *
@@ -10,6 +23,7 @@ class ParseError(Exception):
 
 # ── Tokeniser ────────────────────────────────────────────────────────────────
 
+# Single-character Unicode symbols recognised by the tokeniser
 SYMBOLS = ['∀', '∃', '¬', '∧', '∨', '→', '⊤', '⊥', '(', ')', '.', ',']
 
 
@@ -24,7 +38,7 @@ def tokenise(text: str) -> list[str]:
             i += 1
             continue
 
-        # ASCII fallbacks
+        # ASCII fallbacks for environments without Unicode input
         if text[i:i+2] == '->':
             tokens.append('→')
             i += 2
@@ -48,7 +62,7 @@ def tokenise(text: str) -> list[str]:
             i += 1
             continue
 
-        # Identifiers
+        # Identifiers: predicate names, variables, constants
         if ch.isalnum() or ch == '_':
             j = i
             while j < len(text) and (text[j].isalnum() or text[j] == '_'):
@@ -71,9 +85,11 @@ class Parser:
         self.bound_vars: list[str] = []
 
     def peek(self) -> str | None:
+        """Return the current token without consuming it."""
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
     def consume(self, expected: str | None = None) -> str:
+        """Consume and return the current token, optionally checking its value."""
         token = self.peek()
         if token is None:
             if expected is None:
@@ -85,10 +101,12 @@ class Parser:
         return token
 
     def at_end(self) -> bool:
+        """Return True if all tokens have been consumed."""
         return self.pos >= len(self.tokens)
 
     # formula ::= implies
     def parse_formula(self) -> Formula:
+        """Entry point — parse a complete formula."""
         return self.parse_implies()
 
     # implies ::= or ('→' implies)?
